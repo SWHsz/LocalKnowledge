@@ -1,0 +1,36 @@
+# Zotero RAG 配置文件
+
+# Zotero 本地存储路径
+zotero:
+  # Zotero 数据目录（包含 storage 文件夹和 zotero.sqlite）
+  # Linux: ~/.zotero/zotero/<profile>/zotero/
+  # macOS: ~/Zotero/
+  # Windows: C:/Users/<user>/Zotero/
+  data_dir: "C:\\Users\\xx\\Zotero"
+  
+  # 或者直接指定 storage 目录
+  # storage_dir: "~/Zotero/storage"
+
+# 本地路径配置
+paths:
+  # 向量数据库存放目录
+  vector_db: "./data/chroma_db"
+  # 缓存目录
+  cache_dir: "./data/cache"
+
+# Ollama 配置
+ollama:
+  base_url: "http://localhost:11434"
+  llm_model: "qwen2.5:7b-instruct-q4_K_M"
+  embed_model: "nomic-embed-text"
+
+# RAG 配置
+rag:
+  # 分块大小
+  chunk_size: 1024
+  # 分块重叠
+  chunk_overlap: 200
+  # 检索返回的文档数
+  top_k: 5
+  # 相似度阈值
+  similarity_threshold: 0.5

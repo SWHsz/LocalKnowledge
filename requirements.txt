@@ -1,0 +1,17 @@
+# Zotero RAG 依赖
+
+# 文档解析
+pymupdf>=1.24.0
+
+# 向量化和 RAG
+llama-index-core>=0.11.0
+llama-index-llms-ollama>=0.3.0
+llama-index-embeddings-ollama>=0.3.0
+lancedb>=0.17.0
+
+# 工具库
+pyyaml>=6.0
+rich>=13.7.0
+
+# Web 界面
+gradio>=4.40.0
