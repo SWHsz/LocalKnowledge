@@ -225,6 +225,9 @@ async def zotero_search(params: SearchInput) -> str:
                 "authors": meta.get("authors", "Unknown"),
                 "year": meta.get("year", ""),
                 "page": meta.get("page", 0),
+                "journal": meta.get("journal", ""),
+                "doi": meta.get("doi", ""),
+                "tags": meta.get("tags", ""),
                 "relevance_score": round(node.score, 3) if node.score else 0,
                 "snippet": node.node.text[:500] + "..." if len(node.node.text) > 500 else node.node.text
             })
@@ -257,6 +260,7 @@ async def zotero_list_papers(params: ListPapersInput) -> str:
     """列出 Zotero 文献库中的论文。
     
     获取文献库中所有论文的概览，可按年份筛选。
+    包含完整元数据：标题、作者、年份、期刊、DOI、标签等。
     
     Args:
         params: 包含筛选条件的参数
@@ -288,6 +292,10 @@ async def zotero_list_papers(params: ListPapersInput) -> str:
                 "title": info.get("title", "Unknown"),
                 "authors": info.get("authors", "Unknown"),
                 "year": info.get("year", ""),
+                "journal": info.get("journal", ""),
+                "doi": info.get("doi", ""),
+                "tags": info.get("tags", []),
+                "abstract": info.get("abstract", "")[:200] + "..." if len(info.get("abstract", "")) > 200 else info.get("abstract", ""),
                 "pages": info.get("pages", 0),
                 "zotero_key": key
             })
@@ -300,9 +308,13 @@ async def zotero_list_papers(params: ListPapersInput) -> str:
         
         # 统计
         years = {}
+        journals = {}
         for p in state.get("indexed_files", {}).values():
             y = p.get("year", "Unknown")
             years[y] = years.get(y, 0) + 1
+            j = p.get("journal", "")
+            if j:
+                journals[j] = journals.get(j, 0) + 1
         
         return json.dumps({
             "status": "success",
@@ -310,6 +322,7 @@ async def zotero_list_papers(params: ListPapersInput) -> str:
             "returned": len(papers),
             "year_filter": params.year,
             "papers_by_year": dict(sorted(years.items(), reverse=True)),
+            "top_journals": dict(sorted(journals.items(), key=lambda x: -x[1])[:5]),
             "papers": papers
         }, ensure_ascii=False, indent=2)
         

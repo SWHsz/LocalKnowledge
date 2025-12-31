@@ -2,11 +2,10 @@
 """
 Zotero 本地文献索引器
 
-直接读取 Zotero 本地 storage 目录：
-storage/
-├── 3GPQD2K2/
-│   └── Lee 等 - 2025 - Dropout Connects Transformers...pdf
-└── ...
+直接读取 Zotero 本地 storage 目录，并从 zotero.sqlite 获取完整元数据：
+- 标题、作者、年份
+- DOI、期刊名、卷期页码
+- 摘要、标签、笔记
 """
 
 import os
@@ -15,12 +14,11 @@ import json
 import hashlib
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import yaml
 import fitz  # PyMuPDF
-import lancedb
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
@@ -34,17 +32,35 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 
+# 尝试导入元数据模块
+try:
+    from zotero_meta import extract_and_cache_metadata, build_attachment_mapping, PaperMetadata
+    HAS_ZOTERO_META = True
+except ImportError:
+    HAS_ZOTERO_META = False
+
 console = Console()
 
 
 @dataclass
 class PaperInfo:
-    """从文件名解析的论文信息"""
+    """论文信息（从文件名解析 + Zotero 元数据）"""
+    # 基础信息
     authors: str
     year: str
     title: str
     zotero_key: str
     file_path: Path
+    
+    # 扩展元数据（从 Zotero 数据库）
+    doi: str = ""
+    journal: str = ""
+    abstract: str = ""
+    tags: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
+    volume: str = ""
+    issue: str = ""
+    pages: str = ""
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -82,7 +98,30 @@ def parse_filename(filename: str, zotero_key: str, file_path: Path) -> PaperInfo
     )
 
 
-def find_all_pdfs(storage_path: Path) -> list[PaperInfo]:
+def enrich_with_metadata(paper: PaperInfo, metadata: 'PaperMetadata') -> PaperInfo:
+    """用 Zotero 元数据丰富论文信息"""
+    # 优先使用数据库中的信息
+    if metadata.title:
+        paper.title = metadata.title
+    if metadata.authors:
+        paper.authors = ", ".join(metadata.authors)
+    if metadata.year:
+        paper.year = metadata.year
+    
+    # 附加信息
+    paper.doi = metadata.doi
+    paper.journal = metadata.journal
+    paper.abstract = metadata.abstract
+    paper.tags = metadata.tags
+    paper.notes = metadata.notes
+    paper.volume = metadata.volume
+    paper.issue = metadata.issue
+    paper.pages = metadata.pages
+    
+    return paper
+
+
+def find_all_pdfs(storage_path: Path, attachment_map: dict = None) -> list[PaperInfo]:
     """扫描 Zotero storage 目录"""
     papers = []
     
@@ -100,13 +139,19 @@ def find_all_pdfs(storage_path: Path) -> list[PaperInfo]:
         
         for pdf_file in item_dir.glob("*.pdf"):
             paper = parse_filename(pdf_file.name, zotero_key, pdf_file)
+            
+            # 尝试用 Zotero 元数据丰富
+            if attachment_map and zotero_key in attachment_map:
+                metadata = attachment_map[zotero_key]
+                paper = enrich_with_metadata(paper, metadata)
+            
             papers.append(paper)
     
     return papers
 
 
 def extract_pdf_by_pages(paper: PaperInfo) -> list[tuple[str, dict]]:
-    """按页提取 PDF"""
+    """按页提取 PDF，包含丰富的元数据"""
     doc = fitz.open(paper.file_path)
     
     pages = []
@@ -114,6 +159,7 @@ def extract_pdf_by_pages(paper: PaperInfo) -> list[tuple[str, dict]]:
         text = page.get_text()
         if text.strip():
             meta = {
+                # 基础信息
                 "title": paper.title,
                 "authors": paper.authors,
                 "year": paper.year,
@@ -122,6 +168,14 @@ def extract_pdf_by_pages(paper: PaperInfo) -> list[tuple[str, dict]]:
                 "file_path": str(paper.file_path),
                 "page": page_num + 1,
                 "total_pages": len(doc),
+                
+                # 扩展元数据
+                "doi": paper.doi,
+                "journal": paper.journal,
+                "volume": paper.volume,
+                "issue": paper.issue,
+                "pages": paper.pages,
+                "tags": ", ".join(paper.tags) if paper.tags else "",
             }
             pages.append((text, meta))
     
@@ -185,7 +239,22 @@ def index_papers(config: dict, force: bool = False) -> int:
     storage_path = get_zotero_storage_path(config)
     console.print(f"[bold blue]扫描 Zotero storage: {storage_path}[/bold blue]")
     
-    papers = find_all_pdfs(storage_path)
+    # 尝试加载 Zotero 元数据
+    attachment_map = None
+    if HAS_ZOTERO_META:
+        try:
+            console.print("[dim]正在提取 Zotero 元数据...[/dim]")
+            items = extract_and_cache_metadata(config, force=force)
+            if items:
+                attachment_map = build_attachment_mapping(items)
+                console.print(f"[green]已加载 {len(items)} 条元数据[/green]")
+        except Exception as e:
+            console.print(f"[yellow]无法加载 Zotero 元数据: {e}[/yellow]")
+            console.print("[dim]将使用文件名解析元数据[/dim]")
+    else:
+        console.print("[dim]未找到 zotero_meta 模块，使用文件名解析[/dim]")
+    
+    papers = find_all_pdfs(storage_path, attachment_map)
     
     if not papers:
         console.print("[yellow]未找到 PDF 文件[/yellow]")
@@ -234,6 +303,7 @@ def index_papers(config: dict, force: bool = False) -> int:
                     )
                     all_documents.append(doc)
                 
+                # 保存更丰富的状态
                 state["indexed_files"][paper.zotero_key] = {
                     "hash": file_hash,
                     "indexed_at": datetime.now().isoformat(),
@@ -241,17 +311,23 @@ def index_papers(config: dict, force: bool = False) -> int:
                     "authors": paper.authors,
                     "year": paper.year,
                     "pages": len(pages),
+                    "doi": paper.doi,
+                    "journal": paper.journal,
+                    "abstract": paper.abstract[:500] if paper.abstract else "",
+                    "tags": paper.tags,
                 }
                 indexed_count += 1
                 
-                console.print(f"  [green]✓[/green] {paper.authors} ({paper.year}) - {paper.title[:50]}")
+                # 显示更详细的信息
+                journal_info = f" [{paper.journal}]" if paper.journal else ""
+                console.print(f"  [green]✓[/green] {paper.authors} ({paper.year}) - {paper.title[:50]}{journal_info}")
                 
             except Exception as e:
                 console.print(f"  [red]✗[/red] {paper.file_path.name}: {e}")
             
             progress.advance(task)
     
-    # 构建索引（使用简单的本地存储）
+    # 构建索引
     if all_documents:
         console.print(f"\n[bold blue]构建向量索引 ({len(all_documents)} 个文档块)...[/bold blue]")
         
@@ -278,15 +354,32 @@ def get_index_stats(config: dict) -> dict:
     files = state.get("indexed_files", {})
     total_pages = sum(f.get("pages", 0) for f in files.values())
     
+    # 统计
     years = {}
+    journals = {}
+    has_doi = 0
+    has_abstract = 0
+    
     for f in files.values():
         y = f.get("year", "Unknown")
         years[y] = years.get(y, 0) + 1
+        
+        j = f.get("journal", "")
+        if j:
+            journals[j] = journals.get(j, 0) + 1
+        
+        if f.get("doi"):
+            has_doi += 1
+        if f.get("abstract"):
+            has_abstract += 1
     
     return {
         "total_papers": len(files),
         "total_pages": total_pages,
         "by_year": years,
+        "by_journal": journals,
+        "has_doi": has_doi,
+        "has_abstract": has_abstract,
         "last_indexed": state.get("last_indexed"),
     }
 
@@ -313,7 +406,15 @@ def list_indexed_papers(config: dict):
         
         authors = info.get("authors", "Unknown")
         title = info.get("title", "Unknown")
-        console.print(f"  • {authors} - {title[:60]}{'...' if len(title) > 60 else ''}")
+        journal = info.get("journal", "")
+        doi = info.get("doi", "")
+        
+        journal_str = f" [{journal}]" if journal else ""
+        doi_str = f" DOI:{doi}" if doi else ""
+        
+        console.print(f"  • {authors} - {title[:50]}{'...' if len(title) > 50 else ''}{journal_str}")
+        if doi:
+            console.print(f"    [dim]{doi_str}[/dim]")
 
 
 if __name__ == "__main__":
@@ -333,11 +434,21 @@ if __name__ == "__main__":
         console.print("[bold]索引统计:[/bold]")
         console.print(f"  文献数: {stats['total_papers']}")
         console.print(f"  总页数: {stats['total_pages']}")
+        console.print(f"  有 DOI: {stats['has_doi']}")
+        console.print(f"  有摘要: {stats['has_abstract']}")
         console.print(f"  最后索引: {stats['last_indexed']}")
+        
         if stats['by_year']:
-            console.print("\n  按年份:")
+            console.print("\n  [bold]按年份:[/bold]")
             for year, count in sorted(stats['by_year'].items(), reverse=True):
                 console.print(f"    {year}: {count} 篇")
+        
+        if stats['by_journal']:
+            console.print("\n  [bold]按期刊 (Top 10):[/bold]")
+            sorted_journals = sorted(stats['by_journal'].items(), key=lambda x: -x[1])[:10]
+            for journal, count in sorted_journals:
+                console.print(f"    {journal[:40]}: {count} 篇")
+                
     elif args.list:
         list_indexed_papers(config)
     else:
